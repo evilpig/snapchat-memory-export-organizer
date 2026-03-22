@@ -7,12 +7,37 @@ A Python script to organize, rename, tag, and composite your exported Snapchat M
 - **Finds all your export folders automatically** — works with any number of zip exports
 - **Reads `memories_history.json`** for date/time and GPS location data
 - **Embeds EXIF metadata** (date + GPS coordinates) into every photo and video
-- **Renames files** from Snapchat's gibberish format to clean `YYYY-MM-DD_HHMMSS.jpg`
-- **Composites overlay PNGs onto photos** — Snapchat stores text/sticker overlays as separate transparent PNGs; this merges them onto the original automatically
-- **Moves files by default** to save disk space — your original zip files remain as your backup. Set `MOVE_FILES = False` in the script to copy instead (requires ~2x free disk space)
+- **Renames files** from Snapchat's gibberish format to clean `YYYY-MM-DD_HHMMSS` filenames
+- **Composites overlay PNGs onto photos** using Pillow
+- **Burns overlay PNGs onto videos** using ffmpeg (text/stickers baked into every frame)
 - **Consolidates everything** from all export folders into a single `memories_organized/` folder
+- **Interactive setup wizard** — asks your preferences before doing anything
 - **Shows progress** with elapsed time and ETA
 - **Writes a full log** of any warnings or unmatched files
+
+---
+
+## Requirements
+
+### Python 3.7+
+
+### Pillow
+```
+pip install Pillow
+```
+Used for: compositing overlay PNGs onto photos.
+
+### exiftool
+Used for: embedding date and GPS metadata into files.
+- **Windows**: Download from https://exiftool.org/, rename to `exiftool.exe`, place next to the script or add to PATH
+- **macOS**: `brew install exiftool`
+- **Linux**: `sudo apt install exiftool`
+
+### ffmpeg
+Used for: burning overlay PNGs onto videos. Only needed if you choose to process video overlays.
+- **Windows**: Download from https://ffmpeg.org/download.html and place `ffmpeg.exe` next to the script, or run `winget install ffmpeg`
+- **macOS**: `brew install ffmpeg`
+- **Linux**: `sudo apt install ffmpeg`
 
 ---
 
@@ -20,18 +45,7 @@ A Python script to organize, rename, tag, and composite your exported Snapchat M
 
 By default the script **moves** files from your extracted folders into `memories_organized/`, so you only need a small amount of extra space. Your original **zip files are your backup** — don't delete them until you're happy with the output.
 
-If you'd rather keep the extracted files untouched, set `MOVE_FILES = False` in the script — but be aware this requires roughly **2x the size of your export** in free space (e.g. a 22 GB export needs ~44 GB free).
-
----
-
-## Requirements
-
-- Python 3.7+
-- [Pillow](https://pypi.org/project/Pillow/): `pip install Pillow`
-- [exiftool](https://exiftool.org/):
-  - **Windows**: Download, rename to `exiftool.exe`, place next to the script or add to PATH
-  - **macOS**: `brew install exiftool`
-  - **Linux**: `sudo apt install exiftool`
+If you'd rather keep the extracted files untouched, choose **Copy** when the wizard asks — but be aware this requires roughly **2× the size of your export** in free space (e.g. a 22 GB export needs ~44 GB free).
 
 ---
 
@@ -42,7 +56,7 @@ If you'd rather keep the extracted files untouched, set `MOVE_FILES = False` in 
 1. Open Snapchat → Profile → ⚙️ Settings → Privacy Controls → My Data
 2. Select **Memories** and submit the export request
 3. Wait for Snapchat to email you download links (can take hours or days)
-4. Download **all** the zip files — if you have a lot of memories there may be many
+4. Download **all** the zip files they send
 
 ### Step 2 — Extract the zips
 
@@ -56,54 +70,57 @@ snapchat/
   ...
 ```
 
-### Step 3 — Run the script
-
-Place `snapchat_memories_organizer.py` (and `exiftool.exe` on Windows) in the `snapchat/` folder, then run:
+### Step 3 — Install dependencies
 
 ```bash
 pip install Pillow
+```
+
+Install exiftool and ffmpeg per the Requirements section above.
+
+### Step 4 — Run the script
+
+Place `snapchat_memories_organizer.py` in the `snapchat/` folder, then run:
+
+```bash
 python snapchat_memories_organizer.py
 ```
 
-**Example output:**
+The script will check your dependencies, scan your files, then ask a few questions:
+
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║           Snapchat Memories Organizer  v2.0                   ║
-╚═══════════════════════════════════════════════════════════════╝
+  Setup — answer a few questions
 
-✓  Pillow    :  10.3.0
-✓  exiftool  :  exiftool
-✓  JSON      :  ...\mydata~1234567890\json\memories_history.json
-✓  Entries   :  6969 memories in JSON
+  File handling:
+    1) Move files  (saves disk space — keep your zip files as backup)  (default)
+    2) Copy files  (safe, but needs ~2× free disk space)
 
-✓  Scanning memories folders...
-    mydata~1234567890/memories/   →  4100 files
-    mydata~1234567890-2/memories/ →  3895 files
-   Total: 7995 files found
-   Paired with overlay  : 1823
-   No overlay           : 4748
-   No -main/-overlay    : 1424
+  Composite overlay PNGs onto photos? [Y/n]:
 
-✓  Output    :  ...\memories_organized
-✓  Originals :  ...\memories_organized\originals
+  Burn overlay PNGs onto videos? (slower — re-encodes video) [Y/n]:
 
-  14:22:01  [ 10.0%]    697 / 6969  |  elapsed 1m 14s  |  ETA ~10m 46s
-  14:22:51  [ 20.0%]   1394 / 6969  |  elapsed 2m 04s  |  ETA ~8m 16s
-  ...
+  Video re-encode quality:
+    1) Fast / larger file  (CRF 23, good for archiving)
+    2) Balanced            (CRF 28, recommended)           (default)
+    3) Small / lower quality (CRF 33, saves space)
 
-═════════════════════════════════════════════════════════════════
-  ✅  All done!  (11m 02s)
-      Matched & tagged    : 6800
-      Overlays composited : 1620   (originals in /originals/)
-      Composite failures  : 3      (main file copied as fallback)
-      EXIF write warnings : 2      (files still copied, just no metadata)
-      No JSON match       : 169    (missing from local export — see log)
-      Extra files copied  : 1026
-      Output folder       : ...\memories_organized
-      Originals folder    : ...\memories_organized\originals
-      Log file            : ...\memories_organized\organizer_log.txt
-═════════════════════════════════════════════════════════════════
+  Save pre-composite originals to memories_organized/originals/? [Y/n]:
+
+  Composited photo JPEG quality:
+    1) High   (95 — recommended)  (default)
+    2) Medium (85)
+    3) Low    (75 — smaller files)
+
+  Looks good — start processing? [Y/n]:
 ```
+
+### Step 5 — Wait
+
+Video overlay compositing is slow (re-encoding). A rough estimate:
+- **Photos only**: ~1–2 hours for 7000 files
+- **With video overlays**: add ~30–60 seconds per video overlay
+
+Progress is shown every 50 files with elapsed time and ETA.
 
 ---
 
@@ -112,13 +129,12 @@ python snapchat_memories_organizer.py
 ```
 snapchat/
   memories_organized/
-    2016-04-24_012000.jpg    ← renamed, EXIF tagged, overlay composited
-    2016-04-24_011400.jpg
-    2016-07-17_153600.mp4    ← renamed, date + GPS tagged
+    2016-04-24_012000.jpg      ← renamed, EXIF tagged, overlay composited
+    2016-07-17_153600.mp4      ← renamed, date + GPS tagged, overlay burned in
     ...
-    originals/
-      2016-04-24_6b6aad0c-...-main.jpg     ← original pre-composite photo
-      2016-04-24_6b6aad0c-...-overlay.png  ← original overlay PNG
+    originals/                 ← pre-composite originals (if you chose to keep them)
+      2016-04-24_...-main.jpg
+      2016-04-24_...-overlay.png
       ...
     organizer_log.txt
 ```
@@ -129,21 +145,25 @@ snapchat/
 
 | Message | Meaning |
 |---|---|
-| `Overlays composited` | A `-overlay.png` was found and merged onto its `-main` photo. Both originals are in `/originals/`. |
-| `Composite failures` | Compositing failed (unusual file format); the main photo was copied without the overlay as a fallback. |
-| `EXIF write warnings` | exiftool couldn't write metadata to a file (usually corrupted or unusual format). File was still copied and renamed. |
-| `No JSON match` | A JSON entry had no corresponding local file — usually means a zip wasn't fully extracted. Those memories can be re-downloaded from Snapchat before the export links expire. |
-| `Extra files copied` | Local files with no JSON entry. Copied as-is with original filename. |
+| `Photos composited` | Overlay PNG was merged onto the photo using Pillow. |
+| `Videos composited` | Overlay PNG was burned into the video using ffmpeg. |
+| `Composite failures` | Compositing failed; the original file was copied as-is as a fallback. |
+| `EXIF write warnings` | exiftool couldn't write metadata (unusual file format). File still copied. |
+| `No JSON match` | A JSON entry had no corresponding local file — usually an incomplete zip extraction. Those files can be re-downloaded from Snapchat before the export links expire. |
+| `Extra files` | Local files with no JSON entry — copied as-is. |
 
 ---
 
-## Notes
+## Uploading to Immich
 
-- **Original source files are never modified or deleted**
-- Export links from Snapchat expire after a few days — if you have `No JSON match` warnings and want to recover those files, re-download them from Snapchat before the links expire
-- GPS coordinates are embedded as standard EXIF GPS tags — apps like Google Photos will place them on a map automatically
-- On Windows, GPS shows in Explorer's Details pane for photos. For videos, verify with `exiftool yourfile.mp4 | grep GPS`
-- If you have duplicate timestamps (two photos taken the same second), files are named `YYYY-MM-DD_HHMMSS_2.jpg`, `_3.jpg`, etc.
+If you self-host [Immich](https://immich.app/), use the companion script `snapchat_immich_upload.py` to import everything into per-year albums (`Snapchat 2016`, `Snapchat 2017`, etc.).
+
+```bash
+pip install requests
+python snapchat_immich_upload.py
+```
+
+Fill in your `IMMICH_URL` and `IMMICH_API_KEY` at the top of that script first.
 
 ---
 
