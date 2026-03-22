@@ -9,10 +9,18 @@ A Python script to organize, rename, tag, and composite your exported Snapchat M
 - **Embeds EXIF metadata** (date + GPS coordinates) into every photo and video
 - **Renames files** from Snapchat's gibberish format to clean `YYYY-MM-DD_HHMMSS.jpg`
 - **Composites overlay PNGs onto photos** — Snapchat stores text/sticker overlays as separate transparent PNGs; this merges them onto the original automatically
-- **Backs up originals** (pre-composite) to `memories_organized/originals/`
+- **Moves files by default** to save disk space — your original zip files remain as your backup. Set `MOVE_FILES = False` in the script to copy instead (requires ~2x free disk space)
 - **Consolidates everything** from all export folders into a single `memories_organized/` folder
 - **Shows progress** with elapsed time and ETA
 - **Writes a full log** of any warnings or unmatched files
+
+---
+
+## Disk space
+
+By default the script **moves** files from your extracted folders into `memories_organized/`, so you only need a small amount of extra space. Your original **zip files are your backup** — don't delete them until you're happy with the output.
+
+If you'd rather keep the extracted files untouched, set `MOVE_FILES = False` in the script — but be aware this requires roughly **2x the size of your export** in free space (e.g. a 22 GB export needs ~44 GB free).
 
 ---
 
