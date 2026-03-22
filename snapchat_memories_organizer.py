@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║           Snapchat Memories Organizer  v3.0                   ║
+║           Snapchat Memories Organizer  v3.1                   ║
 ╚═══════════════════════════════════════════════════════════════╝
 
 What this script does:
@@ -9,9 +9,10 @@ What this script does:
   ✓ Embeds EXIF date and GPS coordinates into every file
   ✓ Renames files to clean YYYY-MM-DD_HHMMSS format
   ✓ Composites overlay PNGs onto photos (Pillow)
-  ✓ Burns overlay PNGs onto videos (ffmpeg)
+  ✓ Burns overlay PNGs onto videos (ffmpeg) — handles rotation correctly
   ✓ Consolidates everything into a single output folder
-  ✓ Interactive setup wizard — no config file editing needed
+  ✓ Interactive setup wizard with optional video test before full run
+  ✓ Moves files by default to save disk space (zips are your backup)
 
 REQUIREMENTS:
   - Python 3.7+
@@ -25,13 +26,12 @@ REQUIREMENTS:
     macOS:    brew install exiftool
     Linux:    sudo apt install exiftool
 
-  - ffmpeg       https://ffmpeg.org/download.html
-    Windows:  download, place ffmpeg.exe next to this script OR add to PATH
-              OR: winget install ffmpeg
+  - ffmpeg + ffprobe    https://ffmpeg.org/download.html
+    Windows:  download, place ffmpeg.exe + ffprobe.exe next to this script
+              OR add to PATH  OR: winget install ffmpeg
     macOS:    brew install ffmpeg
     Linux:    sudo apt install ffmpeg
-    Used for: burning overlay PNGs onto videos (only needed if you choose
-              to process video overlays)
+    Used for: burning overlay PNGs onto videos (optional)
 
 HOW TO USE:
   1. Export your Memories from Snapchat:
@@ -39,7 +39,7 @@ HOW TO USE:
        Select "Memories" and request the data export.
   2. Download and extract ALL zip files Snapchat sends you.
      Put all the extracted folders into the same parent folder.
-  3. Place this script in that same parent folder:
+  3. Place this script in that folder:
 
        snapchat/
          mydata~1234567890/               ← extracted zip 1
@@ -47,14 +47,22 @@ HOW TO USE:
          snapchat_memories_organizer.py   ← this script
          exiftool.exe                     ← Windows, if not on PATH
          ffmpeg.exe                       ← Windows, if not on PATH
+         ffprobe.exe                      ← Windows, if not on PATH
 
   4. Run:  python snapchat_memories_organizer.py
-     The script will ask you a few questions, then do all the work.
+     Answer the setup questions — optionally run a video test first.
 
   5. Results:
        memories_organized/           ← renamed, tagged, composited files
        memories_organized/originals/ ← pre-composite originals (if kept)
        memories_organized/organizer_log.txt
+
+NOTES:
+  - Original source files are never modified; by default they are moved
+    (not copied) into memories_organized/. Your zip files are your backup.
+  - The script always reads the full JSON regardless of how many zips are
+    extracted — "No JSON match" entries are normal when testing one zip.
+  - Videos that can't be probed for dimensions will be copied as-is.
 """
 
 import json
@@ -69,31 +77,29 @@ from pathlib import Path
 try:
     from PIL import Image
     PILLOW_AVAILABLE = True
-    PILLOW_VERSION = Image.__version__
+    PILLOW_VERSION   = Image.__version__
 except ImportError:
     PILLOW_AVAILABLE = False
-    PILLOW_VERSION = "not installed"
+    PILLOW_VERSION   = "not installed"
 
 
 # ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-BASE_DIR = Path(__file__).parent
-OUTPUT_FOLDER_NAME = "memories_organized"
+BASE_DIR             = Path(__file__).parent
+OUTPUT_FOLDER_NAME   = "memories_organized"
 ORIGINALS_FOLDER_NAME = "originals"
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mp4", ".mov", ".gif", ".heic", ".webp"}
+VIDEO_EXTENSIONS     = {".mp4", ".mov"}
+IMAGE_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"}
+SUPPORTED_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
 
-VIDEO_EXTENSIONS = {".mp4", ".mov"}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"}
-
-# ffmpeg CRF values: lower = better quality, larger file
 VIDEO_QUALITY_PRESETS = {
     "1": ("Fast / larger file  (CRF 23, good for archiving)", 23),
     "2": ("Balanced            (CRF 28, recommended)",        28),
     "3": ("Small / lower quality (CRF 33, saves space)",      33),
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
 
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def fmt_duration(seconds):
     m, s = divmod(int(seconds), 60)
@@ -110,10 +116,6 @@ def eta_str(done, total, elapsed):
 
 
 def ask(prompt, options, default=None):
-    """
-    Print a numbered menu and return the user's choice key.
-    options: dict of key → description string
-    """
     print(f"\n  {prompt}")
     for key, desc in options.items():
         marker = " (default)" if key == default else ""
@@ -143,12 +145,12 @@ def ask_yn(prompt, default="y"):
 # ─── DEPENDENCY CHECKS ────────────────────────────────────────────────────────
 
 def find_tool(name):
-    """Find a tool on PATH or next to the script. Returns path string or None."""
+    # exiftool uses -ver; ffmpeg/ffprobe use -version
+    flag = "-ver" if name == "exiftool" else "-version"
     candidates = [name, str(BASE_DIR / f"{name}.exe"), str(BASE_DIR / name)]
     for c in candidates:
         try:
-            r = subprocess.run([c, "-version" if name == "ffmpeg" else "-ver"],
-                               capture_output=True, text=True)
+            r = subprocess.run([c, flag], capture_output=True, text=True)
             if r.returncode == 0:
                 return c
         except FileNotFoundError:
@@ -169,55 +171,37 @@ def find_json():
     return None
 
 
-def find_memory_files():
-    """Scan all mydata~* subfolders for memories/ directories."""
+def _find_all(base_dir):
     all_files = []
-    for folder in sorted(BASE_DIR.glob("mydata~*")):
+    for folder in sorted(base_dir.glob("mydata~*")):
         memories_dir = folder / "memories"
         if memories_dir.is_dir():
             files = [f for f in memories_dir.iterdir()
-                     if f.is_file() and not f.name.startswith(".")
-                     and f.suffix.lower() in SUPPORTED_EXTENSIONS | {".png"}]
+                     if f.is_file() and not f.name.startswith(".")]
             all_files.extend(files)
             print(f"    {folder.name}/memories/  →  {len(files)} files")
     return all_files
 
 
 def build_file_map(all_files):
-    """
-    Group files into pairs by shared UUID stem prefix.
-    e.g. "2023-05-18_475f61fd-3ba8-...-main.mp4" and
-         "2023-05-18_475f61fd-3ba8-...-overlay.png"
-    share key "2023-05-18_475f61fd-3ba8-..."
-
-    Returns:
-      pairs:    dict  bare_key → {"main": Path|None, "overlay": Path|None}
-      unpaired: list of Path (no -main/-overlay suffix)
-    """
-    main_files = {}
+    main_files    = {}
     overlay_files = {}
-    unpaired = []
-
+    unpaired      = []
     for f in all_files:
         stem = f.stem
         if stem.endswith("-main"):
-            key = stem[:-5]
-            main_files[key] = f
+            main_files[stem[:-5]] = f
         elif stem.endswith("-overlay"):
-            key = stem[:-8]
-            overlay_files[key] = f
+            overlay_files[stem[:-8]] = f
         else:
             unpaired.append(f)
-
     all_keys = set(main_files) | set(overlay_files)
     pairs = {key: {"main": main_files.get(key), "overlay": overlay_files.get(key)}
              for key in all_keys}
-
     return pairs, unpaired
 
 
 def build_date_index(pairs, unpaired):
-    """Index everything by YYYY-MM-DD prefix."""
     index = {}
     for key, pair in pairs.items():
         m = re.match(r"(\d{4}-\d{2}-\d{2})", key)
@@ -279,34 +263,82 @@ def apply_exif(exiftool_path, file_path, dt, lat, lon):
     return subprocess.run(args, capture_output=True, text=True).returncode == 0
 
 
+# ─── VIDEO INFO ───────────────────────────────────────────────────────────────
+
+def get_video_info(ffprobe_path, video_path):
+    """
+    Returns (stored_w, stored_h, display_w, display_h, rotation).
+    Uses two separate ffprobe queries to reliably detect rotation from
+    both stream tags and stream_side_data (displaymatrix).
+    Handles negative rotation values (-90 etc).
+    """
+    cmd_stream = [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+                  "-show_entries", "stream=width,height:stream_tags=rotate",
+                  "-of", "json", str(video_path)]
+    cmd_side   = [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+                  "-show_entries", "stream_side_data=rotation",
+                  "-of", "json", str(video_path)]
+
+    r1 = subprocess.run(cmd_stream, capture_output=True, text=True)
+    r2 = subprocess.run(cmd_side,   capture_output=True, text=True)
+
+    if r1.returncode != 0:
+        return None, None, None, None, 0
+    try:
+        d1     = json.loads(r1.stdout)
+        stream = d1.get("streams", [{}])[0]
+        sw     = stream.get("width")
+        sh     = stream.get("height")
+        rotate = int(stream.get("tags", {}).get("rotate", 0))
+
+        if rotate == 0 and r2.returncode == 0:
+            d2 = json.loads(r2.stdout)
+            for sd in d2.get("streams", [{}])[0].get("side_data_list", []):
+                rot = sd.get("rotation")
+                if rot is not None:
+                    rotate = abs(int(float(rot)))
+                    break
+
+        dw, dh = (sh, sw) if rotate in (90, 270) else (sw, sh)
+        return sw, sh, dw, dh, rotate
+    except Exception:
+        return None, None, None, None, 0
+
+
 # ─── COMPOSITING ──────────────────────────────────────────────────────────────
 
 def composite_photo(main_path, overlay_path, out_path, jpeg_quality):
-    """Composite overlay PNG onto photo using Pillow."""
-    base = Image.open(main_path).convert("RGBA")
+    base    = Image.open(main_path).convert("RGBA")
     overlay = Image.open(overlay_path).convert("RGBA")
     if overlay.size != base.size:
         overlay = overlay.resize(base.size, Image.LANCZOS)
-    merged = Image.alpha_composite(base, overlay)
-    merged.convert("RGB").save(out_path, "JPEG", quality=jpeg_quality)
+    Image.alpha_composite(base, overlay).convert("RGB").save(
+        out_path, "JPEG", quality=jpeg_quality)
 
 
 def composite_video(ffmpeg_path, main_path, overlay_path, out_path, crf):
     """
-    Burn overlay PNG onto every frame of a video using ffmpeg.
-    Uses overlay filter: scales PNG to match video dimensions.
+    Burns overlay PNG onto every frame of a video.
+    ffmpeg auto-applies displaymatrix rotation during encode so the output
+    is always in display orientation. We scale the overlay to display
+    dimensions (dw x dh) so it aligns correctly.
     """
+    ffprobe_path = ffmpeg_path.replace("ffmpeg", "ffprobe")
+    sw, sh, dw, dh, rotate = get_video_info(ffprobe_path, main_path)
+    if sw is None:
+        return False, "Could not determine video dimensions"
+
+    filter_str = f"[1:v]scale={dw}:{dh}[ov];[0:v][ov]overlay=0:0"
+
     cmd = [
-        ffmpeg_path,
-        "-y",                          # overwrite output
-        "-i", str(main_path),          # input video
-        "-i", str(overlay_path),       # input overlay PNG
-        "-filter_complex",
-        "[1:v]scale=iw:ih[ov];[0:v][ov]overlay=0:0",
+        ffmpeg_path, "-y",
+        "-i", str(main_path),
+        "-i", str(overlay_path),
+        "-filter_complex", filter_str,
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", "fast",
-        "-c:a", "copy",                # keep original audio
+        "-c:a", "copy",
         "-movflags", "+faststart",
         str(out_path)
     ]
@@ -321,10 +353,63 @@ def transfer(src, dest, move):
         shutil.copy2(src, dest)
 
 
+# ─── VIDEO TEST ───────────────────────────────────────────────────────────────
+
+def run_video_test(ffmpeg_path):
+    """
+    Find the first video+overlay pair and do a test composite.
+    Shows the output path so the user can verify it looks correct.
+    Returns True if test passed (or user skips), False to abort.
+    """
+    ffprobe_path = ffmpeg_path.replace("ffmpeg", "ffprobe")
+
+    # Find first video+overlay pair
+    test_main = test_overlay = None
+    for folder in sorted(BASE_DIR.glob("mydata~*")):
+        mem = folder / "memories"
+        if not mem.is_dir():
+            continue
+        for f in sorted(mem.iterdir()):
+            if f.stem.endswith("-main") and f.suffix.lower() in VIDEO_EXTENSIONS:
+                ov = f.with_name(f.stem[:-5] + "-overlay.png")
+                if ov.exists():
+                    test_main, test_overlay = f, ov
+                    break
+        if test_main:
+            break
+
+    if not test_main:
+        print("  ⚠  No video+overlay pair found to test — skipping video test.")
+        return True
+
+    print(f"\n  Testing with: {test_main.name}")
+
+    sw, sh, dw, dh, rotate = get_video_info(ffprobe_path, test_main)
+    if sw is None:
+        print("  ❌  Could not probe video dimensions. Check ffprobe is installed.")
+        return False
+
+    print(f"  Video: stored {sw}x{sh}, display {dw}x{dh}, rotation {rotate}°")
+
+    out_path = BASE_DIR / "video_overlay_test_output.mp4"
+    ok, err  = composite_video(ffmpeg_path, test_main, test_overlay, out_path, crf=28)
+
+    if ok and out_path.exists() and out_path.stat().st_size > 50_000:
+        print(f"  ✅  Test output saved to: {out_path.name}")
+        print(f"      Open it and verify the overlay text is correctly positioned.")
+        return ask_yn("  Does the test video look correct?", default="y")
+    else:
+        print(f"  ❌  Video test failed.")
+        if err:
+            for line in err.splitlines()[-5:]:
+                if any(x in line.lower() for x in ["error", "invalid"]):
+                    print(f"      ffmpeg: {line.strip()}")
+        return False
+
+
 # ─── WIZARD ───────────────────────────────────────────────────────────────────
 
-def run_wizard(exiftool_found, ffmpeg_found, pillow_ok):
-    """Ask the user setup questions and return a config dict."""
+def run_wizard(exiftool_found, ffmpeg_path, pillow_ok):
     print()
     print("  ┌─────────────────────────────────────────────────────┐")
     print("  │              Setup — answer a few questions          │")
@@ -350,7 +435,7 @@ def run_wizard(exiftool_found, ffmpeg_found, pillow_ok):
         config["composite_photos"] = False
 
     # Video overlays
-    if ffmpeg_found:
+    if ffmpeg_path:
         config["composite_videos"] = ask_yn(
             "Burn overlay PNGs onto videos? (slower — re-encodes video)", default="y")
         if config["composite_videos"]:
@@ -360,13 +445,21 @@ def run_wizard(exiftool_found, ffmpeg_found, pillow_ok):
                 default="2"
             )
             config["video_crf"] = VIDEO_QUALITY_PRESETS[choice][1]
+
+            # Optional video test
+            if ask_yn("  Run a quick video overlay test before the full run?", default="y"):
+                print()
+                passed = run_video_test(ffmpeg_path)
+                if not passed:
+                    print("\n  ❌  Video test failed or output looked wrong.")
+                    print("      Fix the issue and re-run, or choose not to process video overlays.")
+                    sys.exit(1)
     else:
         print("\n  ⚠  ffmpeg not found — video overlay compositing disabled.")
-        print("     Install ffmpeg and place ffmpeg.exe next to this script to enable.")
         config["composite_videos"] = False
         config["video_crf"] = 28
 
-    # Keep originals backup
+    # Keep originals
     if config["composite_photos"] or config["composite_videos"]:
         config["keep_originals"] = ask_yn(
             "Save pre-composite originals to memories_organized/originals/?",
@@ -374,7 +467,7 @@ def run_wizard(exiftool_found, ffmpeg_found, pillow_ok):
     else:
         config["keep_originals"] = False
 
-    # JPEG quality for photo compositing
+    # JPEG quality
     if config["composite_photos"]:
         choice = ask(
             "Composited photo JPEG quality:",
@@ -387,7 +480,6 @@ def run_wizard(exiftool_found, ffmpeg_found, pillow_ok):
     else:
         config["jpeg_quality"] = 95
 
-    # Progress interval
     config["progress_every"] = 50
 
     print()
@@ -415,11 +507,11 @@ def main():
 
     print()
     print("╔═══════════════════════════════════════════════════════════════╗")
-    print("║           Snapchat Memories Organizer  v3.0                   ║")
+    print("║           Snapchat Memories Organizer  v3.1                   ║")
     print("╚═══════════════════════════════════════════════════════════════╝")
     print()
 
-    # ── Dependency checks ──
+    # Dependency checks
     if not PILLOW_AVAILABLE:
         print("  ⚠  Pillow not installed  (pip install Pillow)")
     else:
@@ -443,7 +535,7 @@ def main():
         print("      macOS   : brew install ffmpeg")
         print("      Linux   : sudo apt install ffmpeg")
 
-    # ── Find JSON ──
+    # Find JSON
     json_path = find_json()
     if not json_path:
         print("\n  ❌  Could not find memories_history.json in any mydata~* folder.")
@@ -455,20 +547,20 @@ def main():
     entries = data.get("Saved Media", [])
     print(f"  ✓  Entries    {len(entries)} memories in JSON")
 
-    # ── Collect files ──
+    # Collect files
     print()
     print(f"  Scanning memories folders in {BASE_DIR} ...")
-    all_files = find_memory_files(BASE_DIR) if False else _find_all(BASE_DIR)
+    all_files = _find_all(BASE_DIR)
     pairs, unpaired = build_file_map(all_files)
     date_index = build_date_index(pairs, unpaired)
 
-    photo_pairs  = sum(1 for p in pairs.values()
-                       if p["overlay"] and p["main"]
-                       and p["main"].suffix.lower() in IMAGE_EXTENSIONS)
-    video_pairs  = sum(1 for p in pairs.values()
-                       if p["overlay"] and p["main"]
-                       and p["main"].suffix.lower() in VIDEO_EXTENSIONS)
-    no_overlay   = sum(1 for p in pairs.values() if not p["overlay"])
+    photo_pairs = sum(1 for p in pairs.values()
+                      if p["overlay"] and p["main"]
+                      and p["main"].suffix.lower() in IMAGE_EXTENSIONS)
+    video_pairs = sum(1 for p in pairs.values()
+                      if p["overlay"] and p["main"]
+                      and p["main"].suffix.lower() in VIDEO_EXTENSIONS)
+    no_overlay  = sum(1 for p in pairs.values() if not p["overlay"])
 
     print(f"  Total files found    : {len(all_files)}")
     print(f"  Photo + overlay pairs: {photo_pairs}")
@@ -476,11 +568,15 @@ def main():
     print(f"  No overlay           : {no_overlay}")
     print(f"  Unpaired files       : {len(unpaired)}")
 
-    # ── Wizard ──
+    if not all_files:
+        print("\n  ❌  No files found in any mydata~*/memories/ folder.")
+        sys.exit(1)
+
+    # Wizard
     cfg = run_wizard(exiftool_path, ffmpeg_path, PILLOW_AVAILABLE)
 
-    # ── Set up output ──
-    output_dir   = BASE_DIR / OUTPUT_FOLDER_NAME
+    # Set up output dirs
+    output_dir    = BASE_DIR / OUTPUT_FOLDER_NAME
     originals_dir = output_dir / ORIGINALS_FOLDER_NAME
     output_dir.mkdir(exist_ok=True)
     if cfg["keep_originals"]:
@@ -492,17 +588,17 @@ def main():
         print(f"  Originals : {originals_dir}")
     print()
 
-    # ── Process ──
-    date_cursors   = {k: 0 for k in date_index}
-    used_names     = set()
-    matched        = 0
+    # Process
+    date_cursors     = {k: 0 for k in date_index}
+    used_names       = set()
+    matched          = 0
     photo_composited = 0
     video_composited = 0
     composite_failed = 0
-    unmatched      = 0
-    unmatched_list = []
-    skipped        = 0
-    exif_failed    = 0
+    unmatched        = 0
+    unmatched_list   = []
+    skipped          = 0
+    exif_failed      = 0
     exif_failed_list = []
 
     total = len(entries)
@@ -531,7 +627,6 @@ def main():
         item = items[cursor]
         date_cursors[date_key] = cursor + 1
         kind = item[0]
-
         dest = None
 
         if kind == "pair":
@@ -540,7 +635,6 @@ def main():
             overlay_file = pair["overlay"]
 
             if main_file is None:
-                # Overlay only — treat as standalone
                 ext      = overlay_file.suffix
                 new_name = unique_filename(dt, ext, used_names)
                 dest     = output_dir / new_name
@@ -548,58 +642,60 @@ def main():
 
             elif overlay_file and cfg["composite_photos"] \
                     and main_file.suffix.lower() in IMAGE_EXTENSIONS:
-                # Photo composite
                 new_name = unique_filename(dt, ".jpg", used_names)
                 dest     = output_dir / new_name
                 try:
-                    composite_photo(main_file, overlay_file, dest,
-                                    cfg["jpeg_quality"])
+                    composite_photo(main_file, overlay_file, dest, cfg["jpeg_quality"])
                     photo_composited += 1
                     if cfg["keep_originals"]:
-                        shutil.copy2(main_file, originals_dir / main_file.name)
+                        shutil.copy2(main_file,    originals_dir / main_file.name)
                         shutil.copy2(overlay_file, originals_dir / overlay_file.name)
                     if cfg["move"]:
                         main_file.unlink()
                         overlay_file.unlink()
-                except Exception as e:
+                except Exception:
                     composite_failed += 1
                     transfer(main_file, dest, cfg["move"])
 
             elif overlay_file and cfg["composite_videos"] \
                     and main_file.suffix.lower() in VIDEO_EXTENSIONS:
-                # Video composite
                 ext      = main_file.suffix
                 new_name = unique_filename(dt, ext, used_names)
                 dest     = output_dir / new_name
-                ok, _    = composite_video(ffmpeg_path, main_file,
+                ok, err  = composite_video(ffmpeg_path, main_file,
                                            overlay_file, dest, cfg["video_crf"])
                 if ok:
                     video_composited += 1
                     if cfg["keep_originals"]:
-                        shutil.copy2(main_file, originals_dir / main_file.name)
+                        shutil.copy2(main_file,    originals_dir / main_file.name)
                         shutil.copy2(overlay_file, originals_dir / overlay_file.name)
                     if cfg["move"]:
                         main_file.unlink()
                         overlay_file.unlink()
                 else:
                     composite_failed += 1
+                    if err:
+                        relevant = [l for l in err.splitlines()
+                                    if any(x in l.lower() for x in
+                                           ["error", "invalid", "failed"])]
+                        if relevant:
+                            print(f"\n  [VIDEO FAIL] {main_file.name}")
+                            for line in relevant[-3:]:
+                                print(f"    {line.strip()}")
                     transfer(main_file, dest, cfg["move"])
 
             else:
-                # No overlay compositing — just transfer main
                 ext      = main_file.suffix
                 new_name = unique_filename(dt, ext, used_names)
                 dest     = output_dir / new_name
                 transfer(main_file, dest, cfg["move"])
 
         else:
-            # Unpaired file
             _, _, src_file = item
             new_name = unique_filename(dt, src_file.suffix, used_names)
             dest     = output_dir / new_name
             transfer(src_file, dest, cfg["move"])
 
-        # Apply EXIF to output
         if dest and dest.exists():
             if not apply_exif(exiftool_path, dest, dt, lat, lon):
                 exif_failed += 1
@@ -614,14 +710,13 @@ def main():
                   f"  |  elapsed {fmt_duration(elapsed)}"
                   f"  |  ETA ~{eta_str(matched, total, elapsed)}")
 
-    # ── Extra files ──
+    # Extra files
     extra = 0
     for date_key, items in date_index.items():
         cursor = date_cursors.get(date_key, 0)
         for item in items[cursor:]:
-            kind = item[0]
             srcs = []
-            if kind == "pair":
+            if item[0] == "pair":
                 _, _, pair = item
                 srcs = [f for f in [pair["main"], pair["overlay"]] if f]
             else:
@@ -635,11 +730,11 @@ def main():
                 transfer(src, dest, cfg["move"])
                 extra += 1
 
-    # ── Log ──
+    # Log
     elapsed_total = time.time() - start_time
     log_path = output_dir / "organizer_log.txt"
     with open(log_path, "w", encoding="utf-8") as log:
-        log.write("Snapchat Memories Organizer v3.0 — run log\n")
+        log.write("Snapchat Memories Organizer v3.1 — run log\n")
         log.write(f"Completed  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         log.write(f"Duration   : {fmt_duration(elapsed_total)}\n\n")
         log.write(f"Settings:\n")
@@ -648,12 +743,12 @@ def main():
         log.write(f"  Video overlays   : {'Yes' if cfg['composite_videos'] else 'No'}\n\n")
         log.write(f"Results:\n")
         log.write(f"  Matched & tagged     : {matched}\n")
-        log.write(f"  Photo composited     : {photo_composited}\n")
-        log.write(f"  Video composited     : {video_composited}\n")
+        log.write(f"  Photos composited    : {photo_composited}\n")
+        log.write(f"  Videos composited    : {video_composited}\n")
         log.write(f"  Composite failures   : {composite_failed}\n")
         log.write(f"  EXIF write warnings  : {exif_failed}\n")
         log.write(f"  No JSON match        : {unmatched}\n")
-        log.write(f"  Extra files copied   : {extra}\n")
+        log.write(f"  Extra files          : {extra}\n")
         log.write(f"  Skipped (bad data)   : {skipped}\n")
         if unmatched_list:
             log.write("\n── No local file found for these JSON entries ──\n")
@@ -664,7 +759,7 @@ def main():
             for n in exif_failed_list:
                 log.write(f"  {n}\n")
 
-    # ── Summary ──
+    # Summary
     print()
     print("═" * 65)
     print(f"  ✅  All done!  ({fmt_duration(elapsed_total)})")
@@ -672,7 +767,7 @@ def main():
     print(f"      Photos composited    : {photo_composited}")
     print(f"      Videos composited    : {video_composited}")
     print(f"      Composite failures   : {composite_failed}  (original copied as fallback)")
-    print(f"      EXIF write warnings  : {exif_failed}  (files still copied, no metadata)")
+    print(f"      EXIF write warnings  : {exif_failed}")
     print(f"      No JSON match        : {unmatched}  (missing from local export)")
     print(f"      Extra files          : {extra}")
     print(f"      Skipped (bad data)   : {skipped}")
@@ -682,19 +777,6 @@ def main():
     print(f"      Log file             : {log_path}")
     print("═" * 65)
     print()
-
-
-def _find_all(base_dir):
-    """Scan all mydata~* subfolders for memories/ directories."""
-    all_files = []
-    for folder in sorted(base_dir.glob("mydata~*")):
-        memories_dir = folder / "memories"
-        if memories_dir.is_dir():
-            files = [f for f in memories_dir.iterdir()
-                     if f.is_file() and not f.name.startswith(".")]
-            all_files.extend(files)
-            print(f"    {folder.name}/memories/  →  {len(files)} files")
-    return all_files
 
 
 if __name__ == "__main__":
