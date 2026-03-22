@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════╗
-║           Snapchat Memories Organizer  v2.0                   ║
+║           Snapchat Memories Organizer  v2.1                   ║
 ╚═══════════════════════════════════════════════════════════════╝
 
 What this script does:
@@ -11,7 +11,8 @@ What this script does:
   ✓ Consolidates everything into a single output folder
   ✓ Composites overlay PNGs onto their matching photos automatically
   ✓ Backs up originals (pre-composite) to memories_organized/originals/
-  ✓ Writes a full log of warnings and unmatched files
+  ✓ Moves files by default to save disk space (your zip files are the backup)
+  ✓ Set MOVE_FILES = False to copy instead (requires ~2x free disk space)
 
 REQUIREMENTS:
   - Python 3.7+
@@ -91,7 +92,19 @@ PROGRESS_EVERY = 100
 # JPEG quality for composited images (1-95)
 COMPOSITE_QUALITY = 95
 
+# Move files instead of copying (saves disk space — your zip files are the backup)
+# Set to False to copy instead, which requires ~2x the disk space of your export
+MOVE_FILES = True
+
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def transfer(src, dest):
+    """Move or copy a file depending on MOVE_FILES setting."""
+    if MOVE_FILES:
+        shutil.move(str(src), dest)
+    else:
+        shutil.copy2(src, dest)
 
 
 def fmt_duration(seconds):
@@ -293,6 +306,7 @@ def main():
 
     print(f"✓  Pillow    :  {Image.__version__}")
     print(f"✓  exiftool  :  {exiftool_path}")
+    print(f"✓  Mode      :  {'MOVE (originals will be removed after processing)' if MOVE_FILES else 'COPY (originals kept, ~2x disk space required)'}")
 
     # 2. Load JSON
     json_path = find_json(BASE_DIR)
@@ -384,12 +398,12 @@ def main():
             overlay_file = pair["overlay"]
 
             if main_file is None:
-                # Overlay with no main — copy overlay as-is
+                # Overlay with no main — transfer overlay as-is
                 ext = overlay_file.suffix
                 new_name = unique_filename(dt, ext, used_names)
                 dest = output_dir / new_name
-                shutil.copy2(overlay_file, dest)
                 shutil.copy2(overlay_file, originals_dir / overlay_file.name)
+                transfer(overlay_file, dest)
             elif overlay_file is not None and PILLOW_AVAILABLE:
                 # Composite overlay onto main
                 ext = ".jpg"
@@ -398,27 +412,30 @@ def main():
                 try:
                     composite_images(main_file, overlay_file, dest)
                     composited += 1
-                    # Back up both originals
+                    # Back up both originals then remove if moving
                     shutil.copy2(main_file, originals_dir / main_file.name)
                     shutil.copy2(overlay_file, originals_dir / overlay_file.name)
+                    if MOVE_FILES:
+                        main_file.unlink()
+                        overlay_file.unlink()
                 except Exception as e:
                     composite_failed += 1
-                    # Fall back to copying main without overlay
-                    shutil.copy2(main_file, dest)
+                    # Fall back to transferring main without overlay
+                    transfer(main_file, dest)
             else:
-                # Main with no overlay — copy as normal
+                # Main with no overlay — transfer as normal
                 ext = main_file.suffix
                 new_name = unique_filename(dt, ext, used_names)
                 dest = output_dir / new_name
-                shutil.copy2(main_file, dest)
+                transfer(main_file, dest)
 
         else:
-            # Unpaired file — copy as-is
+            # Unpaired file — transfer as-is
             _, _, src_file = item
             ext = src_file.suffix
             new_name = unique_filename(dt, ext, used_names)
             dest = output_dir / new_name
-            shutil.copy2(src_file, dest)
+            transfer(src_file, dest)
 
         # Apply EXIF to the output file
         if not apply_exif(exiftool_path, dest, dt, lat, lon):
@@ -449,7 +466,7 @@ def main():
                         while dest.exists():
                             dest = output_dir / f"{f.stem}_{counter}{f.suffix}"
                             counter += 1
-                        shutil.copy2(f, dest)
+                        transfer(f, dest)
                         extra += 1
             else:
                 _, _, src_file = item
@@ -458,7 +475,7 @@ def main():
                 while dest.exists():
                     dest = output_dir / f"{src_file.stem}_{counter}{src_file.suffix}"
                     counter += 1
-                shutil.copy2(src_file, dest)
+                transfer(src_file, dest)
                 extra += 1
 
     # 7. Write log
