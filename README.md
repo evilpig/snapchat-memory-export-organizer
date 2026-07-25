@@ -16,6 +16,10 @@ A Python script to organize, rename, tag, and composite your exported Snapchat M
 - **Shows progress** with elapsed time and ETA
 - **Writes a full log** of any warnings or unmatched files
 
+<img width="673" height="623" alt="image" src="https://github.com/user-attachments/assets/e9b6b300-08e4-4567-9633-c56ab6cd5be2" />
+
+<img width="746" height="584" alt="image" src="https://github.com/user-attachments/assets/90dcc8ff-56de-44a8-a5c9-c4e97346ca4f" />
+
 ---
 
 ## Requirements
