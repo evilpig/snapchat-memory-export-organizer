@@ -1,6 +1,6 @@
 # Snapchat Memories Organizer
 
-A Python script to organize, rename, tag, and composite your exported Snapchat Memories — without re-downloading anything from Snapchat's servers.
+A Python script to organize, rename, tag, and composite your exported Snapchat Memories — without re-downloading anything from Snapchat's servers. Includes an optional Immich Upload Script as well.
 
 ## What it does
 
